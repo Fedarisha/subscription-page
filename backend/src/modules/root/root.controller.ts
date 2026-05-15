@@ -15,6 +15,8 @@ import { IJwtPayload } from '@common/constants';
 import { SubpageConfigService } from './subpage-config.service';
 import { RootService } from './root.service';
 
+const FEDARISHA_CLIENT_TYPES: readonly string[] = ['fedarisha-json'];
+
 @Controller()
 export class RootController {
     private readonly logger = new Logger(RootController.name);
@@ -51,7 +53,11 @@ export class RootController {
             );
         }
 
-        if (!REQUEST_TEMPLATE_TYPE_VALUES.includes(clientType as TRequestTemplateTypeKeys)) {
+        const isKnownClientType =
+            REQUEST_TEMPLATE_TYPE_VALUES.includes(clientType as TRequestTemplateTypeKeys) ||
+            FEDARISHA_CLIENT_TYPES.includes(clientType);
+
+        if (!isKnownClientType) {
             this.logger.error(`Invalid client type: ${clientType}`);
 
             response.socket?.destroy();
