@@ -69,10 +69,10 @@ jobs:
           platforms: linux/amd64, linux/arm64
           push: true
           tags: |
-            remnawave/subscription-page:latest
-            remnawave/subscription-page:${{github.ref_name}}
-            ghcr.io/remnawave/subscription-page:latest
-            ghcr.io/remnawave/subscription-page:${{github.ref_name}}
+            voltara13/subscription-page:latest
+            voltara13/subscription-page:${{github.ref_name}}
+            ghcr.io/fedarisha/subscription-page:latest
+            ghcr.io/fedarisha/subscription-page:${{github.ref_name}}
 
   send-telegram-message:
     name: Send Telegram message
