@@ -1,61 +1,43 @@
-name: Build and push
+name: Publish Docker image
 
 on:
   push:
-    tags:
-      - '*'
+    branches: [dev]
+    tags: ['*']
 
-  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: subscription-page-image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  send-start-deploy-telegram-message:
-    name: Send Telegram message
+  frontend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v7
-
-      - name: Send Telegram message
-        uses: proDreams/actions-telegram-notifier@main
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
-          thread_id: ${{ secrets.TELEGRAM_TOPIC_ID }}
-          status: info
-          notify_fields: 'repository,branch,commit,workflow'
-          title: 'Build started'
-
-  build-frontend:
-    name: Build frontend
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24.x'
+          node-version: '24'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm ci
-          npm run start:build
-
-      - name: Upload frontend dist
-        uses: actions/upload-artifact@v7
+      - run: npm ci
+      - run: npm run start:build
+      - uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
           path: frontend/dist
           if-no-files-found: error
           retention-days: 1
 
-  build-docker-images:
+  build:
     name: Build ${{ matrix.platform }}
-    needs: [build-frontend]
+    needs: frontend
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -63,139 +45,85 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            arch: amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
-      - name: Prepare platform pair
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
-
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download frontend dist
-        uses: actions/download-artifact@v8
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: frontend/dist
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.TOKEN_GH_DEPLOY }}
-
+          username: ${{ github.actor }}
+          password: ${{ secrets.TOKEN_GH_DEPLOY || github.token }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.platform }}
-          outputs: |
-            type=image,"name=voltara13/subscription-page,ghcr.io/fedarisha/subscription-page",push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
+          outputs: type=image,name=ghcr.io/fedarisha/subscription-page,push-by-digest=true,name-canonical=true,push=true
+      - name: Save digest
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
+          name: digests-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  merge:
-    name: Merge & push manifests
-    needs: [build-docker-images]
+  publish:
+    needs: build
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
-          path: ${{ runner.temp }}/digests
           pattern: digests-*
+          path: ${{ runner.temp }}/digests
           merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.TOKEN_GH_DEPLOY }}
-
-      - name: Create & push manifest lists
+          username: ${{ github.actor }}
+          password: ${{ secrets.TOKEN_GH_DEPLOY || github.token }}
+      - name: Publish multiarch image
         working-directory: ${{ runner.temp }}/digests
         run: |
-          docker buildx imagetools create \
-            -t voltara13/subscription-page:latest \
-            -t voltara13/subscription-page:${{ github.ref_name }} \
-            $(printf 'voltara13/subscription-page@sha256:%s ' *)
-
-          docker buildx imagetools create \
-            -t ghcr.io/fedarisha/subscription-page:latest \
-            -t ghcr.io/fedarisha/subscription-page:${{ github.ref_name }} \
-            $(printf 'ghcr.io/fedarisha/subscription-page@sha256:%s ' *)
-
-      - name: Inspect image
-        run: docker buildx imagetools inspect voltara13/subscription-page:${{ github.ref_name }}
-
-  send-telegram-message:
-    name: Send Telegram message
-    needs: [merge]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v7
-
-      - name: Send Telegram message
-        uses: proDreams/actions-telegram-notifier@main
+          tags=(-t "ghcr.io/fedarisha/subscription-page:$GITHUB_REF_NAME")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tags+=(-t ghcr.io/fedarisha/subscription-page:latest)
+          fi
+          docker buildx imagetools create "${tags[$]}" $(
+            for digest in *; do
+              printf 'ghcr.io/fedarisha/subscription-page$sha256:%s ' "$digest"
+            done
+          )
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
         with:
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
-          thread_id: ${{ secrets.TELEGRAM_TOPIC_ID }}
-          status: success
-          notify_fields: 'repository,branch,commit,workflow'
-          title: 'Build finished'
-
-  notify-on-error:
-    runs-on: ubuntu-latest
-    needs: [build-frontend, build-docker-images, merge]
-    if: failure()
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v7
-
-      - name: Send Telegram message
-        uses: proDreams/actions-telegram-notifier@main
-        with:
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
-          thread_id: ${{ secrets.TELEGRAM_TOPIC_ID }}
-          status: error
-          notify_fields: 'repository,branch,commit,workflow'
-          title: 'Build failed'
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+      - name: Mirror to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        run: |
+          tags=(-t "voltara13/subscription-page:$GITHUB_REF_NAME")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tags+=(-t voltara13/subscription-page:latest)
+          fi
+          docker buildx imagetools create "${tags[$]}" "ghcr.io/fedarisha/subscription-page:$GITHUB_REF_NAME"
