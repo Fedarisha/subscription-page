@@ -1,11 +1,13 @@
 module.exports = {
     apps: [
         {
-            name: 'remnawave-subscription-page',
-            script: 'dist/src/main.js',
+            name: 'remnawave-subpage',
+            script: 'dist/main.js',
             watch: false,
             instances: process.env.SUBSCRIPTION_PAGE_INSTANCES || 1,
             merge_logs: true,
+            out_file: '/dev/null',
+            error_file: '/dev/null',
             exec_mode: 'cluster',
             instance_var: 'INSTANCE_ID',
             env_development: {
@@ -14,7 +16,7 @@ module.exports = {
             env_production: {
                 NODE_ENV: 'production',
             },
-            namespace: 'subscription-page',
+            namespace: 'subpage',
         },
     ],
 };

@@ -1,23 +1,20 @@
-import { ConfigModule } from '@nestjs/config';
 import { Module } from '@nestjs/common';
+import { ConditionalModule } from '@nestjs/config';
 
-import { validateEnvConfig } from '@common/utils/validate-env-config';
-import { configSchema, Env } from '@common/config/app-config';
 import { AxiosModule } from '@common/axios/axios.module';
+import { AppConfigModule } from '@common/config/app-config/app-config.module';
 
-import { SubscriptionPageBackendModule } from '@modules/subscription-page-backend.modules';
+import { MarzbanModule } from '@modules/marzban/marzban.module';
+import { SubscriptionModule } from '@modules/subscription/subscription.module';
+import { WebpageModule } from '@modules/webpage/webpage.module';
 
 @Module({
     imports: [
+        AppConfigModule,
         AxiosModule,
-        ConfigModule.forRoot({
-            isGlobal: true,
-            cache: true,
-            envFilePath: '.env',
-            validate: (config) => validateEnvConfig<Env>(configSchema, config),
-        }),
-
-        SubscriptionPageBackendModule,
+        WebpageModule,
+        ConditionalModule.registerWhen(MarzbanModule, 'MARZBAN_LEGACY_LINK_ENABLED'),
+        SubscriptionModule,
     ],
 })
 export class AppModule {}

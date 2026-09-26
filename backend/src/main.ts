@@ -1,28 +1,32 @@
 process.title = 'rw-subpage';
 
-import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
 import cookieParser from 'cookie-parser';
-import { createLogger } from 'winston';
-import compression from 'compression';
-import * as winston from 'winston';
-import { json } from 'express';
-import path from 'node:path';
+import { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
+import path from 'node:path';
+import sirv from 'sirv';
+import { createLogger } from 'winston';
+import * as winston from 'winston';
 
-import { NestExpressApplication } from '@nestjs/platform-express';
-import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 import { APP_CONFIG_ROUTE_WO_LEADING_PATH } from '@remnawave/subscription-page-types';
 
-import { checkAssetsCookieMiddleware } from '@common/middlewares/check-assets-cookie.middleware';
+import { TypedConfigService } from '@common/config/app-config';
 import { NotFoundExceptionFilter } from '@common/exception/not-found-exception.filter';
-import { isDevelopment, isDevOrDebugLogsEnabled } from '@common/utils/startup-app';
-import { noRobotsMiddleware, proxyCheckMiddleware } from '@common/middlewares';
-import { getStartMessage } from '@common/utils/startup-app/get-start-message';
+import {
+    headerFilterMiddleware,
+    noRobotsMiddleware,
+    proxyCheckMiddleware,
+    checkAssetsCookieMiddleware,
+    getRealIp,
+} from '@common/middlewares';
 import { customLogFilter } from '@common/utils/filter-logs/filter-logs';
-import { getRealIp } from '@common/middlewares/get-real-ip';
+import { getAssetsPath, isDevelopment, isDevOrDebugLogsEnabled } from '@common/utils/startup-app';
+import { getStartMessage } from '@common/utils/startup-app/get-start-message';
 
 import { AppModule } from './app.module';
 
@@ -46,7 +50,7 @@ const logger = createLogger({
             format: 'YYYY-MM-DD HH:mm:ss.SSS',
         }),
         winston.format.ms(),
-        nestWinstonModuleUtilities.format.nestLike(`#${instanceId}`, {
+        nestWinstonModuleUtilities.format.nestLike(`${instanceId}`, {
             colors: true,
             prettyPrint: true,
             processId: false,
@@ -56,10 +60,6 @@ const logger = createLogger({
     level: isDevOrDebugLogsEnabled() ? 'debug' : 'http',
 });
 
-const assetsPath = isDevelopment()
-    ? path.join(__dirname, '..', '..', 'dev_frontend')
-    : '/opt/app/frontend';
-
 async function bootstrap(): Promise<void> {
     const app = await NestFactory.create<NestExpressApplication>(AppModule, {
         logger: WinstonModule.createLogger({
@@ -67,34 +67,45 @@ async function bootstrap(): Promise<void> {
         }),
     });
 
+    const config = app.get(TypedConfigService);
+
+    app.set('etag', false);
     app.disable('x-powered-by');
 
-    app.use(cookieParser());
+    app.set('trust proxy', config.getOrThrow('TRUST_PROXY'));
 
-    app.use(noRobotsMiddleware, proxyCheckMiddleware, checkAssetsCookieMiddleware, getRealIp);
+    app.use('/internal/health', (req: Request, res: Response, next: NextFunction) => {
+        const ip = req.socket.remoteAddress ?? '';
+        const isLoopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 
-    app.useGlobalFilters(new NotFoundExceptionFilter());
+        if (isLoopback && !req.headers['x-forwarded-for'] && req.path === '/') {
+            res.status(200).type('text/plain').send('OK');
+            return;
+        }
 
-    app.useStaticAssets(assetsPath, {
-        index: false,
-        dotfiles: 'ignore',
+        next();
     });
 
-    app.setBaseViewsDir(assetsPath);
+    if (!isDevelopment()) {
+        app.use(proxyCheckMiddleware);
+    }
 
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const consolidate = require('@ladjs/consolidate');
+    app.use('/assets', cookieParser());
+    app.use('/assets', checkAssetsCookieMiddleware);
 
-    app.engine('html', consolidate.ejs);
-    app.setViewEngine('html');
+    app.use(noRobotsMiddleware, getRealIp, headerFilterMiddleware);
 
-    app.use(json({ limit: '100mb' }));
-
-    const config = app.get(ConfigService);
+    app.use(
+        '/assets',
+        sirv(path.join(getAssetsPath(), 'assets'), {
+            maxAge: 604800, // 7 days
+            immutable: true,
+            etag: false,
+            // dev: isDevelopment(),
+        }),
+    );
 
     app.use(helmet({ contentSecurityPolicy: false }));
-
-    app.use(compression());
 
     app.use(
         morgan(
@@ -105,15 +116,17 @@ async function bootstrap(): Promise<void> {
         ),
     );
 
-    const customSubPrefix = config.get<string>('CUSTOM_SUB_PREFIX') || '';
+    const customSubPrefix = config.get('CUSTOM_SUB_PREFIX');
 
-    app.setGlobalPrefix(customSubPrefix, { exclude: [APP_CONFIG_ROUTE_WO_LEADING_PATH] });
+    app.setGlobalPrefix(customSubPrefix ?? '', { exclude: [APP_CONFIG_ROUTE_WO_LEADING_PATH] });
 
     if (customSubPrefix) {
         logger.info('[CONFIG] CUSTOM_SUB_PREFIX: ' + customSubPrefix);
     } else {
         logger.info('[CONFIG] CUSTOM_SUB_PREFIX: not set');
     }
+
+    app.useGlobalFilters(new NotFoundExceptionFilter());
 
     app.enableCors({
         origin: '*',
@@ -123,8 +136,13 @@ async function bootstrap(): Promise<void> {
 
     app.enableShutdownHooks();
 
-    await app.listen(Number(config.getOrThrow<string>('APP_PORT')));
+    await app.listen(Number(config.getOrThrow('APP_PORT')));
 
     logger.info('\n' + (await getStartMessage()) + '\n');
+
+    if (import.meta.webpackHot) {
+        import.meta.webpackHot.accept();
+        import.meta.webpackHot.dispose(() => app.close());
+    }
 }
 void bootstrap();
